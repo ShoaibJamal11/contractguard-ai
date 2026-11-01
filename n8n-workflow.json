@@ -1,0 +1,127 @@
+{
+  "name": "My workflow 2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "3728bd23-ebae-4925-abc1-0ca972b13cb3",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "7843bd10-7aa4-44a9-ab41-61432d213d7a",
+      "name": "Webhook",
+      "webhookId": "3728bd23-ebae-4925-abc1-0ca972b13cb3"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "file",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "3abfba4b-aa2b-499d-b970-19c973fd90d3",
+      "name": "Extract from File"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GROQ_API_KEY_HERE"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  JSON.stringify({\n    model: \"allam-2-7b\",\n    messages: [\n      {\n        role: \"system\",\n        content: \"You are a legal contract risk analyzer. Respond ONLY with a valid raw JSON object (no markdown, no backticks) containing exactly two keys: \\\"riskLevel\\\" (must be \\\"Low\\\", \\\"Medium\\\", or \\\"High\\\") and \\\"summary\\\" (a concise 2-3 sentence risk analysis).\"\n      },\n      {\n        role: \"user\",\n        content: \"Analyze this document:\\n\\n\" + ($json.text || \"\").slice(0, 6000)\n      }\n    ]\n  })\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        448,
+        0
+      ],
+      "id": "329cfd1c-4425-4f72-b271-cae1e8d52367",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.choices[0].message.content }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        672,
+        0
+      ],
+      "id": "d1b39497-5655-4ded-aa84-697d2b27c1e3",
+      "name": "Respond to Webhook"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract from File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract from File": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "39dfd2d7-17ae-49b6-a47d-42e3428c5535",
+  "meta": {
+    "instanceId": "e90ac38bfda0fd302f6b9ee9c64fe9c7134f641f0df6de1aedc4a1d1a8ceb903"
+  },
+  "nodeGroups": [],
+  "id": "NNA7dRp7Ijx3PIAv",
+  "tags": []
+}
