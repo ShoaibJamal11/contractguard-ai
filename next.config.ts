@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   experimental: {
     agentFeedback: true,
   },
+  // Treat pdf-parse as a server-side external so Turbopack never tries to
+  // bundle this CJS-only package — it is required at runtime via Node.js directly.
+  serverExternalPackages: ['pdf-parse'],
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
