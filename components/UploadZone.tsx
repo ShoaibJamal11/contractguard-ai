@@ -40,8 +40,17 @@ export default function UploadZone({ onUploadSuccess }: UploadZoneProps) {
       body.append('file', file)
 
       try {
-        const res  = await fetch('/api/analyze', { method: 'POST', body })
-        const json: AnalyzeResponse = await res.json()
+        const res     = await fetch('/api/analyze', { method: 'POST', body })
+        const rawText = await res.text()
+
+        // Parse safely — log raw text if JSON parsing fails so errors are visible
+        let json: AnalyzeResponse
+        try {
+          json = JSON.parse(rawText) as AnalyzeResponse
+        } catch {
+          console.error('[UploadZone] Server returned non-JSON body:', rawText.slice(0, 500))
+          throw new Error(`Server returned an unexpected response (HTTP ${res.status}). Check the server logs.`)
+        }
 
         if (!res.ok || !json.success) {
           throw new Error(json.error ?? `Server error (${res.status})`)

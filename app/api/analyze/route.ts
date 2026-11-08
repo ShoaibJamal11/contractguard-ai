@@ -19,6 +19,66 @@ interface GroqAnalysisResult {
   summary:   string
 }
 
+// ─── Utility: safe JSON parse that never throws ───────────────────────────────
+// Strips markdown code fences (```json ... ```) that LLMs sometimes prepend.
+
+function safeJsonParse(raw: string): Record<string, unknown> | null {
+  if (!raw || typeof raw !== 'string') return null
+
+  // Strip markdown code fences if present
+  const stripped = raw
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim()
+
+  if (!stripped) return null
+
+  try {
+    const parsed = JSON.parse(stripped)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+    return null
+  } catch {
+    // Try to extract a JSON object substring as a last resort
+    const match = stripped.match(/\{[\s\S]*\}/)
+    if (match) {
+      try {
+        return JSON.parse(match[0]) as Record<string, unknown>
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+}
+
+// ─── Utility: read a Response body as text, never throw ──────────────────────
+
+async function safeReadText(res: Response): Promise<string> {
+  try {
+    return await res.text()
+  } catch {
+    return ''
+  }
+}
+
+// ─── Utility: normalise raw LLM JSON object → GroqAnalysisResult ─────────────
+
+function normaliseAnalysis(obj: Record<string, unknown>): GroqAnalysisResult {
+  const rawLevel = typeof obj.riskLevel === 'string' ? obj.riskLevel : ''
+  const riskLevel = (['High', 'Medium', 'Low'] as const).find(
+    (r) => r.toLowerCase() === rawLevel.toLowerCase()
+  ) ?? 'Pending'
+
+  const summary =
+    typeof obj.summary === 'string' && obj.summary.trim()
+      ? obj.summary.trim()
+      : 'No summary was returned by the analysis model.'
+
+  return { riskLevel, summary }
+}
+
 // ─── Helper: extract plain text from a PDF File object ───────────────────────
 
 async function extractPdfText(file: File): Promise<string> {
@@ -33,7 +93,7 @@ async function extractPdfText(file: File): Promise<string> {
 async function callGroqDirect(text: string, signal: AbortSignal): Promise<GroqAnalysisResult> {
   const groqKey = process.env.GROQ_API_KEY
   if (!groqKey) {
-    throw new Error('GROQ_API_KEY is not configured.')
+    throw new Error('GROQ_API_KEY is not configured. Add it to .env.local to enable direct analysis.')
   }
 
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -62,27 +122,47 @@ async function callGroqDirect(text: string, signal: AbortSignal): Promise<GroqAn
     }),
   })
 
+  const bodyText = await safeReadText(res)
+
   if (!res.ok) {
-    const errText = await res.text().catch(() => '')
-    throw new Error(`Groq API error ${res.status}: ${errText}`)
+    console.error(`[ContractGuard] Groq API error ${res.status}:`, bodyText)
+    throw new Error(`Groq API returned ${res.status}. Check your GROQ_API_KEY.`)
   }
 
-  const json = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
-  const raw  = json?.choices?.[0]?.message?.content ?? ''
+  // Parse the outer Groq response envelope
+  const envelope = safeJsonParse(bodyText)
+  if (!envelope) {
+    console.error('[ContractGuard] Groq returned an unparseable body:', bodyText)
+    throw new Error('Groq returned an unexpected response format.')
+  }
 
-  // Parse the JSON that Groq returns (same as n8n's Respond to Webhook node reads it)
-  const parsed = JSON.parse(raw) as { riskLevel?: string; summary?: string }
-  const riskLevel = (['High', 'Medium', 'Low'] as const).find(
-    (r) => r.toLowerCase() === parsed.riskLevel?.toLowerCase()
-  ) ?? 'Pending'
+  // Extract the LLM message content
+  const choices  = Array.isArray(envelope.choices) ? envelope.choices : []
+  const content  = (choices[0] as { message?: { content?: string } })?.message?.content ?? ''
 
-  return { riskLevel, summary: parsed.summary ?? '' }
+  if (!content) {
+    console.warn('[ContractGuard] Groq choices[0].message.content was empty.')
+    return { riskLevel: 'Pending', summary: 'The analysis model returned an empty response.' }
+  }
+
+  // Parse the inner JSON that the LLM produced
+  const parsed = safeJsonParse(content)
+  if (!parsed) {
+    console.warn('[ContractGuard] Could not parse LLM JSON content:', content)
+    // Return a graceful fallback rather than crashing
+    return {
+      riskLevel: 'Pending',
+      summary:   `Analysis model responded with non-JSON content: "${content.slice(0, 200)}"`,
+    }
+  }
+
+  return normaliseAnalysis(parsed)
 }
 
 // ─── Helper: try n8n webhook, return null on any failure ─────────────────────
 
 async function tryN8nWebhook(
-  file: File,
+  file:       File,
   webhookUrl: string,
   signal:     AbortSignal,
 ): Promise<GroqAnalysisResult | null> {
@@ -96,23 +176,29 @@ async function tryN8nWebhook(
     }
 
     const n8nRes = await fetch(webhookUrl, { method: 'POST', headers, body: outForm, signal })
+    const bodyText = await safeReadText(n8nRes)
 
     if (!n8nRes.ok) {
       console.warn(`[ContractGuard] n8n returned ${n8nRes.status} — will fall back to direct Groq.`)
       return null
     }
 
-    // n8n's "Respond to Webhook" node sends raw JSON text from the LLM
-    const text = await n8nRes.text()
-    const parsed = JSON.parse(text) as { riskLevel?: string; summary?: string }
-    const riskLevel = (['High', 'Medium', 'Low'] as const).find(
-      (r) => r.toLowerCase() === parsed.riskLevel?.toLowerCase()
-    ) ?? 'Pending'
+    if (!bodyText.trim()) {
+      console.warn('[ContractGuard] n8n returned an empty body — will fall back to direct Groq.')
+      return null
+    }
 
-    return { riskLevel, summary: parsed.summary ?? '' }
+    // n8n's "Respond to Webhook" node sends the raw LLM JSON text
+    const parsed = safeJsonParse(bodyText)
+    if (!parsed) {
+      console.warn('[ContractGuard] Could not parse n8n response body:', bodyText.slice(0, 300))
+      return null
+    }
+
+    return normaliseAnalysis(parsed)
   } catch (err) {
     if ((err as Error).name === 'AbortError') throw err  // propagate timeout
-    console.warn('[ContractGuard] n8n unreachable — will fall back to direct Groq.', err)
+    console.warn('[ContractGuard] n8n unreachable — will fall back to direct Groq.', (err as Error).message)
     return null
   }
 }
@@ -201,9 +287,10 @@ export async function POST(request: NextRequest): Promise<Response> {
       )
     }
 
-    console.error('[ContractGuard] Analysis failed:', err)
+    const message = (err as Error).message || 'Analysis failed. Please try again.'
+    console.error('[ContractGuard] Analysis pipeline failed:', message)
     return Response.json(
-      { success: false, error: (err as Error).message || 'Analysis failed. Please try again.' } satisfies AnalyzeResponse,
+      { success: false, error: message } satisfies AnalyzeResponse,
       { status: 502 }
     )
   }
